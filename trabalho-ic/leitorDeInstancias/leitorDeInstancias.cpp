@@ -92,17 +92,30 @@ static std::vector<double> lerLinhaMatriz(const std::string& linha, int num_esco
     return distancias;
 }
 
-// "NUM_CANDIDATOS: 4561 NUM_ESCOLAS: 15"
-static void lerCabecalho(const std::string& linha, Instancia& instancia) {
+// Cada campo do cabeçalho pode estar em uma linha própria.
+static void lerCabecalho(
+    const std::string& linha,
+    Instancia& instancia,
+    bool& achou_candidatos,
+    bool& achou_escolas
+) {
     std::stringstream ss(linha);
     std::string rotulo;
-    bool achou_candidatos = false, achou_escolas = false;
+
     while (ss >> rotulo) {
-        if (rotulo == "NUM_CANDIDATOS:") achou_candidatos = static_cast<bool>(ss >> instancia.num_candidatos);
-        else if (rotulo == "NUM_ESCOLAS:") achou_escolas = static_cast<bool>(ss >> instancia.num_escolas);
-    }
-    if (!achou_candidatos || !achou_escolas) {
-        throw std::invalid_argument("cabeçalho inválido, esperado 'NUM_CANDIDATOS: N NUM_ESCOLAS: M'");
+        if (rotulo == "NUM_CANDIDATOS:") {
+            if (!(ss >> instancia.num_candidatos)) {
+                throw std::invalid_argument("número de candidatos ausente");
+            }
+            achou_candidatos = true;
+        } else if (rotulo == "NUM_ESCOLAS:") {
+            if (!(ss >> instancia.num_escolas)) {
+                throw std::invalid_argument("número de escolas ausente");
+            }
+            achou_escolas = true;
+        } else {
+            throw std::invalid_argument("rótulo de cabeçalho inválido: '" + rotulo + "'");
+        }
     }
 }
 
@@ -115,10 +128,13 @@ bool lerInstancia(const std::string& caminho, Instancia& instancia) {
 
     enum Secao { CABECALHO, CANDIDATOS, ESCOLAS, MATRIZ };
     Secao secao = CABECALHO;
+    bool achou_candidatos = false;
+    bool achou_escolas = false;
     std::string linha;
     int num_linha = 0;
 
     try {
+        instancia.nome = separar(caminho, '/').back();
         while (std::getline(arquivo, linha)) {
             ++num_linha;
             linha = aparar(linha);
@@ -133,7 +149,7 @@ bool lerInstancia(const std::string& caminho, Instancia& instancia) {
 
             switch (secao) {
                 case CABECALHO:
-                    lerCabecalho(linha, instancia);
+                    lerCabecalho(linha, instancia, achou_candidatos, achou_escolas);
                     break;
                 case CANDIDATOS:
                     instancia.candidatos.push_back(lerCandidato(linha));
@@ -145,6 +161,13 @@ bool lerInstancia(const std::string& caminho, Instancia& instancia) {
                     instancia.matriz_distancias.push_back(lerLinhaMatriz(linha, instancia.num_escolas));
                     break;
             }
+        }
+
+        if (!achou_candidatos || !achou_escolas) {
+            throw std::invalid_argument(
+                "cabeçalho incompleto; esperado 'NUM_CANDIDATOS: N' "
+                "e 'NUM_ESCOLAS: M'"
+            );
         }
     } catch (const std::exception& e) {
         // std::stoi/stod lançam com mensagem curta ("stod"); o número da linha diz onde olhar

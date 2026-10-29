@@ -26,6 +26,7 @@ struct Escola {
 };
 
 struct Instancia {
+    std::string nome;
     int num_candidatos = 0;
     int num_escolas = 0;
     std::vector<Candidato> candidatos;
