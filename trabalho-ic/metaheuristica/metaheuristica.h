@@ -8,6 +8,7 @@
 
 extern int K_VIZINHOS;
 extern int PESO_TIPO_PROVA;
+extern int MAX_TIPOS_POR_ESCOLA;
 
 struct Grupo {
     int id;
@@ -21,5 +22,11 @@ double calcularDistancia(double lat1, double lon1, double lat2, double lon2, std
 std::vector<Grupo> criarGruposIniciais(const std::vector<Candidato>& candidatos, int num_grupos);
 void agruparCandidatosKNN(std::vector<Candidato>& candidatos, std::vector<Grupo>& grupos);
 void alocarGruposEscolas(std::vector<Grupo>& grupos, std::vector<Escola>& escolas, std::vector<Candidato>& candidatos);
+
+
+bool validarSolucao(const std::vector<Candidato>& candidatos, const std::vector<Escola>& escolas);
+
+
+int criarSolucaoInicial(std::vector<Candidato>& candidatos, std::vector<Escola>& escolas);
 
 #endif
