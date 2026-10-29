@@ -116,11 +116,7 @@ static int acharEscolaComVaga(int origem, const std::string& tipo_prova, const s
     return -1;
 }
 
-// Verificação exata de viabilidade: existe alguma alocação em que toda escola respeita
-// a capacidade e recebe no máximo maxTipos tipos de prova? Não depende do KNN.
-
-// maxTipos = 1: cada escola atende um tipo só. Cobre um tipo por vez com escolas ainda
-// livres ('usadas' é uma máscara de bits); 'sobra' é quanto ainda pode ser desperdiçado.
+// apenas para validar instâncias, feito por IA
 static bool cobrirTipo(const std::vector<int>& demandas, const std::vector<int>& capacidades,
                        int tipo, long long usadas, int sobra, std::set<std::pair<int, long long>>& falhas);
 
@@ -150,9 +146,7 @@ static bool cobrirTipo(const std::vector<int>& demandas, const std::vector<int>&
     return false;
 }
 
-// maxTipos >= 2: escolhe, escola por escola, quais tipos ela aceita. 'cabe[B]' guarda quantas
-// vagas ainda podem ir para escolas que só aceitam tipos do conjunto B (bits = tipos) sem deixar
-// candidato de fora; começa em demanda(B) + folga (condição de Hall).
+
 static bool escolherTiposDasEscolas(const std::vector<int>& capacidades, const std::vector<int>& conjuntos,
                                     int escola, std::vector<int>& cabe, std::set<std::vector<int>>& falhas) {
     if (escola == (int)capacidades.size()) return true;
@@ -220,7 +214,11 @@ bool instanciaViavel(const std::vector<Candidato>& candidatos, const std::vector
 
     std::vector<int> conjuntos;
     for (int S = 0; S < (1 << numTipos); ++S) {
-        if (__builtin_popcount(S) == maxTipos) conjuntos.push_back(S);
+        int tiposNoConjunto = 0;
+        for (int t = 0; t < numTipos; ++t) {
+            if (S & (1 << t)) tiposNoConjunto++;
+        }
+        if (tiposNoConjunto == maxTipos) conjuntos.push_back(S);
     }
 
     std::vector<int> cabe(1 << numTipos, folga);
@@ -233,6 +231,7 @@ bool instanciaViavel(const std::vector<Candidato>& candidatos, const std::vector
     std::set<std::vector<int>> falhas;
     return escolherTiposDasEscolas(capacidades, conjuntos, 0, cabe, falhas);
 }
+// apenas para validar instâncias, feito por IA
 
 int criarSolucaoInicial(std::vector<Candidato>& candidatos, std::vector<Escola>& escolas) {
     if (!instanciaViavel(candidatos, escolas, MAX_TIPOS_POR_ESCOLA)) {
@@ -284,4 +283,207 @@ int criarSolucaoInicial(std::vector<Candidato>& candidatos, std::vector<Escola>&
     }
 
     return validarSolucao(candidatos, escolas) ? 0 : -1;
+}
+
+double avaliarSolucao(const Instancia& instancia) {
+    double soma = 0;
+    for (size_t j = 0; j < instancia.escolas.size(); ++j) {
+        for (int idx_cand : instancia.escolas[j].candidatos_alocados) {
+            soma += instancia.matriz_distancias[idx_cand][j];
+        }
+    }
+    return soma;
+}
+
+struct DadosTroca {
+    int numTipos;
+    std::vector<int> tipoDoAluno;
+    std::vector<std::vector<int>> quantosDoTipo;
+    std::vector<std::vector<std::vector<double>>> melhorVariacao;
+    std::vector<std::vector<std::vector<int>>> melhorAluno;
+};
+
+static DadosTroca montarDadosTroca(const Instancia& instancia) {
+    DadosTroca d;
+    int numEscolas = instancia.escolas.size();
+
+    std::map<std::string, int> indiceTipo;
+    for (const Candidato& c : instancia.candidatos) {
+        if (indiceTipo.count(c.tipo_prova) == 0) {
+            int novo = indiceTipo.size();
+            indiceTipo[c.tipo_prova] = novo;
+        }
+        d.tipoDoAluno.push_back(indiceTipo[c.tipo_prova]);
+    }
+    d.numTipos = indiceTipo.size();
+
+    d.quantosDoTipo.assign(numEscolas, std::vector<int>(d.numTipos, 0));
+    d.melhorVariacao.assign(numEscolas, std::vector<std::vector<double>>(numEscolas, std::vector<double>(d.numTipos, std::numeric_limits<double>::max())));
+    d.melhorAluno.assign(numEscolas, std::vector<std::vector<int>>(numEscolas, std::vector<int>(d.numTipos, -1)));
+
+    for (int de = 0; de < numEscolas; ++de) {
+        for (int aluno : instancia.escolas[de].candidatos_alocados) {
+            int t = d.tipoDoAluno[aluno];
+            d.quantosDoTipo[de][t]++;
+            for (int para = 0; para < numEscolas; ++para) {
+                if (para == de) continue;
+                double variacao = instancia.matriz_distancias[aluno][para] - instancia.matriz_distancias[aluno][de];
+                if (variacao < d.melhorVariacao[de][para][t]) {
+                    d.melhorVariacao[de][para][t] = variacao;
+                    d.melhorAluno[de][para][t] = aluno;
+                }
+            }
+        }
+    }
+    return d;
+}
+
+static bool tiposOk(const DadosTroca& d, int escola, int tipoQueSai, int tipoQueEntra) {
+    int tiposDiferentes = 0;
+    for (int t = 0; t < d.numTipos; ++t) {
+        int quantos = d.quantosDoTipo[escola][t];
+        if (t == tipoQueSai) quantos--;
+        if (t == tipoQueEntra) quantos++;
+        if (quantos > 0) tiposDiferentes++;
+    }
+    return tiposDiferentes <= MAX_TIPOS_POR_ESCOLA;
+}
+
+static void transferirAluno(Instancia& instancia, int aluno, int de, int para) {
+    std::vector<int>& lista = instancia.escolas[de].candidatos_alocados;
+    lista.erase(std::find(lista.begin(), lista.end(), aluno));
+    instancia.escolas[para].candidatos_alocados.push_back(aluno);
+    instancia.candidatos[aluno].id_escola_atribuida = instancia.escolas[para].id;
+}
+
+bool moverAluno(Instancia& instancia) {
+    DadosTroca d = montarDadosTroca(instancia);
+    int numEscolas = instancia.escolas.size();
+
+    double melhor = -1e-9;
+    int melhorDe = -1, melhorPara = -1, melhorTipo = -1;
+    for (int de = 0; de < numEscolas; ++de) {
+        for (int para = 0; para < numEscolas; ++para) {
+            if (para == de) continue;
+            if ((int)instancia.escolas[para].candidatos_alocados.size() >= instancia.escolas[para].capacidadeMaxima) continue;
+            for (int t = 0; t < d.numTipos; ++t) {
+                if (d.melhorAluno[de][para][t] == -1) continue;
+                if (d.melhorVariacao[de][para][t] >= melhor) continue;
+                if (!tiposOk(d, para, -1, t)) continue;
+                melhor = d.melhorVariacao[de][para][t];
+                melhorDe = de;
+                melhorPara = para;
+                melhorTipo = t;
+            }
+        }
+    }
+
+    if (melhorDe == -1) return false;
+    transferirAluno(instancia, d.melhorAluno[melhorDe][melhorPara][melhorTipo], melhorDe, melhorPara);
+    return true;
+}
+
+bool trocarDoisAlunos(Instancia& instancia) {
+    DadosTroca d = montarDadosTroca(instancia);
+    int numEscolas = instancia.escolas.size();
+
+    double melhor = -1e-9;
+    int melhorA = -1, melhorB = -1, melhorTa = -1, melhorTb = -1;
+    for (int a = 0; a < numEscolas; ++a) {
+        for (int b = a + 1; b < numEscolas; ++b) {
+            for (int ta = 0; ta < d.numTipos; ++ta) {
+                if (d.melhorAluno[a][b][ta] == -1) continue;
+                for (int tb = 0; tb < d.numTipos; ++tb) {
+                    if (d.melhorAluno[b][a][tb] == -1) continue;
+                    double variacao = d.melhorVariacao[a][b][ta] + d.melhorVariacao[b][a][tb];
+                    if (variacao >= melhor) continue;
+                    if (!tiposOk(d, a, ta, tb) || !tiposOk(d, b, tb, ta)) continue;
+                    melhor = variacao;
+                    melhorA = a;
+                    melhorB = b;
+                    melhorTa = ta;
+                    melhorTb = tb;
+                }
+            }
+        }
+    }
+
+    if (melhorA == -1) return false;
+    int alunoA = d.melhorAluno[melhorA][melhorB][melhorTa];
+    int alunoB = d.melhorAluno[melhorB][melhorA][melhorTb];
+    transferirAluno(instancia, alunoA, melhorA, melhorB);
+    transferirAluno(instancia, alunoB, melhorB, melhorA);
+    return true;
+}
+
+bool trocarTresAlunos(Instancia& instancia) {
+    DadosTroca d = montarDadosTroca(instancia);
+    int numEscolas = instancia.escolas.size();
+
+    double melhor = -1e-9;
+    int melhorA = -1, melhorB = -1, melhorC = -1, melhorTa = -1, melhorTb = -1, melhorTc = -1;
+    for (int a = 0; a < numEscolas; ++a) {
+        for (int b = 0; b < numEscolas; ++b) {
+            if (b == a) continue;
+            for (int c = 0; c < numEscolas; ++c) {
+                if (c == a || c == b) continue;
+                for (int ta = 0; ta < d.numTipos; ++ta) {
+                    if (d.melhorAluno[a][b][ta] == -1) continue;
+                    for (int tb = 0; tb < d.numTipos; ++tb) {
+                        if (d.melhorAluno[b][c][tb] == -1) continue;
+                        for (int tc = 0; tc < d.numTipos; ++tc) {
+                            if (d.melhorAluno[c][a][tc] == -1) continue;
+                            double variacao = d.melhorVariacao[a][b][ta] + d.melhorVariacao[b][c][tb] + d.melhorVariacao[c][a][tc];
+                            if (variacao >= melhor) continue;
+                            if (!tiposOk(d, a, ta, tc) || !tiposOk(d, b, tb, ta) || !tiposOk(d, c, tc, tb)) continue;
+                            melhor = variacao;
+                            melhorA = a;
+                            melhorB = b;
+                            melhorC = c;
+                            melhorTa = ta;
+                            melhorTb = tb;
+                            melhorTc = tc;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if (melhorA == -1) return false;
+    int alunoA = d.melhorAluno[melhorA][melhorB][melhorTa];
+    int alunoB = d.melhorAluno[melhorB][melhorC][melhorTb];
+    int alunoC = d.melhorAluno[melhorC][melhorA][melhorTc];
+    transferirAluno(instancia, alunoA, melhorA, melhorB);
+    transferirAluno(instancia, alunoB, melhorB, melhorC);
+    transferirAluno(instancia, alunoC, melhorC, melhorA);
+    return true;
+}
+
+static bool aplicarVizinhanca(int k, Instancia& instancia) {
+    switch (k) {
+        case 1: return moverAluno(instancia);
+        case 2: return trocarDoisAlunos(instancia);
+        case 3: return trocarTresAlunos(instancia);
+    }
+    return false;
+}
+
+int executarVND(Instancia& instancia) {
+    int resultado = criarSolucaoInicial(instancia.candidatos, instancia.escolas);
+    if (resultado != 0) {
+        return resultado;
+    }
+
+    const int NUM_VIZINHANCAS = 3;
+    int k = 1;
+    while (k <= NUM_VIZINHANCAS) {
+        if (aplicarVizinhanca(k, instancia)) {
+            k = 1;
+        } else {
+            k++;
+        }
+    }
+
+    return 0;
 }

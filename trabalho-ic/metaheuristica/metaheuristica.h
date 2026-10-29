@@ -31,4 +31,12 @@ bool instanciaViavel(const std::vector<Candidato>& candidatos, const std::vector
 
 int criarSolucaoInicial(std::vector<Candidato>& candidatos, std::vector<Escola>& escolas);
 
+double avaliarSolucao(const Instancia& instancia);
+
+bool moverAluno(Instancia& instancia);
+bool trocarDoisAlunos(Instancia& instancia);
+bool trocarTresAlunos(Instancia& instancia);
+
+int executarVND(Instancia& instancia);
+
 #endif
