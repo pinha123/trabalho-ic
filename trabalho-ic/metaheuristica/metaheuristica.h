@@ -26,6 +26,8 @@ void alocarGruposEscolas(std::vector<Grupo>& grupos, std::vector<Escola>& escola
 
 bool validarSolucao(const std::vector<Candidato>& candidatos, const std::vector<Escola>& escolas);
 
+bool instanciaViavel(const std::vector<Candidato>& candidatos, const std::vector<Escola>& escolas, int maxTipos);
+
 
 int criarSolucaoInicial(std::vector<Candidato>& candidatos, std::vector<Escola>& escolas);
 

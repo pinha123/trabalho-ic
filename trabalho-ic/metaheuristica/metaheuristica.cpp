@@ -116,7 +116,129 @@ static int acharEscolaComVaga(int origem, const std::string& tipo_prova, const s
     return -1;
 }
 
+// Verificação exata de viabilidade: existe alguma alocação em que toda escola respeita
+// a capacidade e recebe no máximo maxTipos tipos de prova? Não depende do KNN.
+
+// maxTipos = 1: cada escola atende um tipo só. Cobre um tipo por vez com escolas ainda
+// livres ('usadas' é uma máscara de bits); 'sobra' é quanto ainda pode ser desperdiçado.
+static bool cobrirTipo(const std::vector<int>& demandas, const std::vector<int>& capacidades,
+                       int tipo, long long usadas, int sobra, std::set<std::pair<int, long long>>& falhas);
+
+static bool escolherEscolasDoTipo(const std::vector<int>& demandas, const std::vector<int>& capacidades,
+                                  int tipo, int escola, long long usadas, int soma, int sobra,
+                                  std::set<std::pair<int, long long>>& falhas) {
+    if (soma >= demandas[tipo]) {
+        return cobrirTipo(demandas, capacidades, tipo + 1, usadas, sobra - (soma - demandas[tipo]), falhas);
+    }
+    for (int e = escola; e < (int)capacidades.size(); ++e) {
+        if (usadas & (1LL << e)) continue;
+        if (soma + capacidades[e] - demandas[tipo] > sobra) continue;
+        if (escolherEscolasDoTipo(demandas, capacidades, tipo, e + 1, usadas | (1LL << e), soma + capacidades[e], sobra, falhas)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool cobrirTipo(const std::vector<int>& demandas, const std::vector<int>& capacidades,
+                       int tipo, long long usadas, int sobra, std::set<std::pair<int, long long>>& falhas) {
+    if (tipo == (int)demandas.size()) return true;
+    if (falhas.count({tipo, usadas})) return false;
+
+    if (escolherEscolasDoTipo(demandas, capacidades, tipo, 0, usadas, 0, sobra, falhas)) return true;
+    falhas.insert({tipo, usadas});
+    return false;
+}
+
+// maxTipos >= 2: escolhe, escola por escola, quais tipos ela aceita. 'cabe[B]' guarda quantas
+// vagas ainda podem ir para escolas que só aceitam tipos do conjunto B (bits = tipos) sem deixar
+// candidato de fora; começa em demanda(B) + folga (condição de Hall).
+static bool escolherTiposDasEscolas(const std::vector<int>& capacidades, const std::vector<int>& conjuntos,
+                                    int escola, std::vector<int>& cabe, std::set<std::vector<int>>& falhas) {
+    if (escola == (int)capacidades.size()) return true;
+
+    std::vector<int> chave = cabe;
+    chave.push_back(escola);
+    if (falhas.count(chave)) return false;
+
+    int todos = (int)cabe.size() - 1;
+    for (int S : conjuntos) {
+        bool cabeEmTodos = true;
+        for (int B = 0; B < todos; ++B) {
+            if ((B & S) == S && cabe[B] < capacidades[escola]) {
+                cabeEmTodos = false;
+                break;
+            }
+        }
+        if (!cabeEmTodos) continue;
+
+        for (int B = 0; B < todos; ++B) {
+            if ((B & S) == S) cabe[B] -= capacidades[escola];
+        }
+        bool deuCerto = escolherTiposDasEscolas(capacidades, conjuntos, escola + 1, cabe, falhas);
+        for (int B = 0; B < todos; ++B) {
+            if ((B & S) == S) cabe[B] += capacidades[escola];
+        }
+        if (deuCerto) return true;
+    }
+
+    falhas.insert(chave);
+    return false;
+}
+
+bool instanciaViavel(const std::vector<Candidato>& candidatos, const std::vector<Escola>& escolas, int maxTipos) {
+    std::map<std::string, int> contagem;
+    for (const Candidato& c : candidatos) {
+        contagem[c.tipo_prova]++;
+    }
+    std::vector<int> demandas;
+    for (const auto& t : contagem) {
+        demandas.push_back(t.second);
+    }
+
+    std::vector<int> capacidades;
+    for (const Escola& e : escolas) {
+        capacidades.push_back(e.capacidadeMaxima);
+    }
+    std::sort(capacidades.begin(), capacidades.end(), std::greater<int>());
+
+    int folga = 0;
+    for (int c : capacidades) folga += c;
+    for (int d : demandas) folga -= d;
+
+    int numTipos = demandas.size();
+    if (folga < 0) return false;
+    if (numTipos == 0) return true;
+    if (maxTipos <= 0) return false;
+    if (maxTipos >= numTipos) return true;
+
+    if (maxTipos == 1) {
+        std::sort(demandas.begin(), demandas.end(), std::greater<int>());
+        std::set<std::pair<int, long long>> falhas;
+        return cobrirTipo(demandas, capacidades, 0, 0, folga, falhas);
+    }
+
+    std::vector<int> conjuntos;
+    for (int S = 0; S < (1 << numTipos); ++S) {
+        if (__builtin_popcount(S) == maxTipos) conjuntos.push_back(S);
+    }
+
+    std::vector<int> cabe(1 << numTipos, folga);
+    for (int B = 0; B < (1 << numTipos); ++B) {
+        for (int t = 0; t < numTipos; ++t) {
+            if (B & (1 << t)) cabe[B] += demandas[t];
+        }
+    }
+
+    std::set<std::vector<int>> falhas;
+    return escolherTiposDasEscolas(capacidades, conjuntos, 0, cabe, falhas);
+}
+
 int criarSolucaoInicial(std::vector<Candidato>& candidatos, std::vector<Escola>& escolas) {
+    if (!instanciaViavel(candidatos, escolas, MAX_TIPOS_POR_ESCOLA)) {
+        return -1;
+    }
+
     std::vector<Grupo> grupos = criarGruposIniciais(candidatos, escolas.size());
     agruparCandidatosKNN(candidatos, grupos);
     alocarGruposEscolas(grupos, escolas, candidatos);
