@@ -5,52 +5,129 @@
 #include <functional>
 #include <limits>
 #include <map>
+#include <random>
 #include <set>
+#include <queue>
 
-int K_VIZINHOS = 1;
 int PESO_TIPO_PROVA = 2;
-int MAX_TIPOS_POR_ESCOLA = 3;
+int MAX_TIPOS_POR_ESCOLA = 2;
+int MAX_ITERACOES_KMEANS = 100;
 
-double calcularDistancia(double lat1, double lon1, double lat2, double lon2, std::string tipo_prova1, std::string tipo_prova2) {
-    double distanciaEuclidiana = std::sqrt(std::pow(lat1 - lat2, 2) + std::pow(lon1 - lon2, 2));
-    int distanciaTipoProva = (tipo_prova1 != tipo_prova2) ? PESO_TIPO_PROVA : 0;
-    double distanciaTotal = std::sqrt(std::pow(distanciaEuclidiana, 2) + std::pow(distanciaTipoProva, 2));
-    return distanciaTotal;
+double distanciaKm(double lat1, double lon1, double lat2, double lon2) {
+    const double KM_POR_GRAU = 111.32;
+    const double PI = 3.14159265358979;
+    double dLat = (lat1 - lat2) * KM_POR_GRAU;
+    double dLon = (lon1 - lon2) * KM_POR_GRAU * std::cos((lat1 + lat2) / 2 * PI / 180);
+    return std::sqrt(dLat * dLat + dLon * dLon);
+}
+
+double calcularDistancia(const Candidato& candidato, const Grupo& grupo) {
+    double geografica = distanciaKm(candidato.latitude, candidato.longitude, grupo.latitude, grupo.longitude);
+
+    double diferencaTipo = 0;
+    for (const auto& t : grupo.proporcao_tipos) {
+        double indicador = (t.first == candidato.tipo_prova) ? 1.0 : 0.0;
+        diferencaTipo += (indicador - t.second) * (indicador - t.second);
+    }
+    if (grupo.proporcao_tipos.count(candidato.tipo_prova) == 0) {
+        diferencaTipo += 1;
+    }
+
+    return std::sqrt(geografica * geografica + PESO_TIPO_PROVA * PESO_TIPO_PROVA * diferencaTipo);
+}
+
+static Grupo grupoNoCandidato(const Candidato& candidato, int id) {
+    Grupo g;
+    g.id = id;
+    g.latitude = candidato.latitude;
+    g.longitude = candidato.longitude;
+    g.proporcao_tipos[candidato.tipo_prova] = 1.0;
+    return g;
 }
 
 std::vector<Grupo> criarGruposIniciais(const std::vector<Candidato>& candidatos, int num_grupos) {
     std::vector<Grupo> grupos;
-    for (int i = 0; i < num_grupos && i < candidatos.size(); ++i) {
-        Grupo g;
-        g.id = i;
-        g.latitude = candidatos[i].latitude;
-        g.longitude = candidatos[i].longitude;
-        g.tipo_prova = candidatos[i].tipo_prova;
-        grupos.push_back(g);
+    if (candidatos.empty() || num_grupos <= 0) {
+        return grupos;
+    }
+
+    std::mt19937 gerador(42);
+    std::uniform_int_distribution<int> sorteio(0, (int)candidatos.size() - 1);
+    grupos.push_back(grupoNoCandidato(candidatos[sorteio(gerador)], 0));
+
+    while ((int)grupos.size() < num_grupos) {
+        std::vector<double> pesos(candidatos.size());
+        double total = 0;
+        for (size_t i = 0; i < candidatos.size(); ++i) {
+            double menor = std::numeric_limits<double>::max();
+            for (const Grupo& g : grupos) {
+                menor = std::min(menor, calcularDistancia(candidatos[i], g));
+            }
+            pesos[i] = menor * menor;
+            total += pesos[i];
+        }
+        if (total == 0) {
+            break;
+        }
+
+        std::discrete_distribution<int> escolha(pesos.begin(), pesos.end());
+        grupos.push_back(grupoNoCandidato(candidatos[escolha(gerador)], grupos.size()));
     }
     return grupos;
 }
 
-void agruparCandidatosKNN(std::vector<Candidato>& candidatos, std::vector<Grupo>& grupos) {
-    for (size_t i = 0; i < candidatos.size(); ++i) {
-        double menor_distancia = std::numeric_limits<double>::max();
-        int id_melhor_grupo = -1;
+void agruparCandidatosKMeans(std::vector<Candidato>& candidatos, std::vector<Grupo>& grupos) {
+    std::vector<int> grupoDoCandidato(candidatos.size(), -1);
 
-        for (size_t j = 0; j < grupos.size(); ++j) {
-            double dist = calcularDistancia(
-                candidatos[i].latitude, candidatos[i].longitude,
-                grupos[j].latitude, grupos[j].longitude,
-                candidatos[i].tipo_prova, grupos[j].tipo_prova
-            );
-
-            if (dist < menor_distancia) {
-                menor_distancia = dist;
-                id_melhor_grupo = j;
+    for (int iteracao = 0; iteracao < MAX_ITERACOES_KMEANS; ++iteracao) {
+        bool mudou = false;
+        for (size_t i = 0; i < candidatos.size(); ++i) {
+            double menor_distancia = std::numeric_limits<double>::max();
+            int melhor_grupo = -1;
+            for (size_t j = 0; j < grupos.size(); ++j) {
+                double dist = calcularDistancia(candidatos[i], grupos[j]);
+                if (dist < menor_distancia) {
+                    menor_distancia = dist;
+                    melhor_grupo = j;
+                }
+            }
+            if (melhor_grupo != grupoDoCandidato[i]) {
+                grupoDoCandidato[i] = melhor_grupo;
+                mudou = true;
             }
         }
+        if (!mudou) {
+            break;
+        }
 
-        if (id_melhor_grupo != -1) {
-            grupos[id_melhor_grupo].candidatos_alocados.push_back(i);
+        for (size_t j = 0; j < grupos.size(); ++j) {
+            double somaLat = 0, somaLon = 0;
+            int quantos = 0;
+            std::map<std::string, double> contagemTipos;
+            for (size_t i = 0; i < candidatos.size(); ++i) {
+                if (grupoDoCandidato[i] != (int)j) continue;
+                somaLat += candidatos[i].latitude;
+                somaLon += candidatos[i].longitude;
+                contagemTipos[candidatos[i].tipo_prova] += 1;
+                quantos++;
+            }
+            if (quantos == 0) continue;
+
+            grupos[j].latitude = somaLat / quantos;
+            grupos[j].longitude = somaLon / quantos;
+            grupos[j].proporcao_tipos.clear();
+            for (const auto& t : contagemTipos) {
+                grupos[j].proporcao_tipos[t.first] = t.second / quantos;
+            }
+        }
+    }
+
+    for (Grupo& g : grupos) {
+        g.candidatos_alocados.clear();
+    }
+    for (size_t i = 0; i < candidatos.size(); ++i) {
+        if (grupoDoCandidato[i] != -1) {
+            grupos[grupoDoCandidato[i]].candidatos_alocados.push_back(i);
         }
     }
 }
@@ -61,7 +138,7 @@ void alocarGruposEscolas(std::vector<Grupo>& grupos, std::vector<Escola>& escola
         int id_escola_proxima = -1;
 
         for (size_t j = 0; j < escolas.size(); ++j) {
-            double dist = std::sqrt(std::pow(grupos[i].latitude - escolas[j].latitude, 2) + std::pow(grupos[i].longitude - escolas[j].longitude, 2));
+            double dist = distanciaKm(grupos[i].latitude, grupos[i].longitude, escolas[j].latitude, escolas[j].longitude);
             if (dist < menor_dist) {
                 menor_dist = dist;
                 id_escola_proxima = j;
@@ -103,19 +180,6 @@ bool validarSolucao(const std::vector<Candidato>& candidatos, const std::vector<
     return true;
 }
 
-static int acharEscolaComVaga(int origem, const std::string& tipo_prova, const std::vector<Escola>& escolas, const std::vector<Candidato>& candidatos) {
-    for (size_t j = 0; j < escolas.size(); ++j) {
-        if ((int)j == origem) continue;
-        if ((int)escolas[j].candidatos_alocados.size() >= escolas[j].capacidadeMaxima) continue;
-
-        std::map<std::string, int> tipos = contarTipos(escolas[j], candidatos);
-        if (tipos.count(tipo_prova) > 0 || (int)tipos.size() < MAX_TIPOS_POR_ESCOLA) {
-            return j;
-        }
-    }
-    return -1;
-}
-
 // apenas para validar instâncias, feito por IA
 static bool cobrirTipo(const std::vector<int>& demandas, const std::vector<int>& capacidades,
                        int tipo, long long usadas, int sobra, std::set<std::pair<int, long long>>& falhas);
@@ -147,8 +211,9 @@ static bool cobrirTipo(const std::vector<int>& demandas, const std::vector<int>&
 }
 
 
-static bool escolherTiposDasEscolas(const std::vector<int>& capacidades, const std::vector<int>& conjuntos,
-                                    int escola, std::vector<int>& cabe, std::set<std::vector<int>>& falhas) {
+static bool escolherTiposDasEscolas(const std::vector<int>& capacidades, const std::vector<std::vector<int>>& conjuntosPorEscola,
+                                    int escola, std::vector<int>& cabe, std::set<std::vector<int>>& falhas,
+                                    std::vector<int>& tiposDaEscola) {
     if (escola == (int)capacidades.size()) return true;
 
     std::vector<int> chave = cabe;
@@ -156,7 +221,7 @@ static bool escolherTiposDasEscolas(const std::vector<int>& capacidades, const s
     if (falhas.count(chave)) return false;
 
     int todos = (int)cabe.size() - 1;
-    for (int S : conjuntos) {
+    for (int S : conjuntosPorEscola[escola]) {
         bool cabeEmTodos = true;
         for (int B = 0; B < todos; ++B) {
             if ((B & S) == S && cabe[B] < capacidades[escola]) {
@@ -169,15 +234,246 @@ static bool escolherTiposDasEscolas(const std::vector<int>& capacidades, const s
         for (int B = 0; B < todos; ++B) {
             if ((B & S) == S) cabe[B] -= capacidades[escola];
         }
-        bool deuCerto = escolherTiposDasEscolas(capacidades, conjuntos, escola + 1, cabe, falhas);
+        bool deuCerto = escolherTiposDasEscolas(
+            capacidades, conjuntosPorEscola, escola + 1, cabe, falhas, tiposDaEscola);
         for (int B = 0; B < todos; ++B) {
             if ((B & S) == S) cabe[B] += capacidades[escola];
         }
-        if (deuCerto) return true;
+        if (deuCerto) {
+            tiposDaEscola[escola] = S;
+            return true;
+        }
     }
 
     falhas.insert(chave);
     return false;
+}
+
+struct ArestaFluxo {
+    int destino;
+    int capacidade;
+    int reversa;
+};
+
+static void adicionarArestaFluxo(
+    std::vector<std::vector<ArestaFluxo>>& grafo,
+    int origem,
+    int destino,
+    int capacidade
+) {
+    ArestaFluxo ida = {destino, capacidade, (int)grafo[destino].size()};
+    ArestaFluxo volta = {origem, 0, (int)grafo[origem].size()};
+    grafo[origem].push_back(ida);
+    grafo[destino].push_back(volta);
+}
+
+static int calcularFluxo(
+    std::vector<std::vector<ArestaFluxo>>& grafo,
+    int origem,
+    int destino
+) {
+    int fluxoTotal = 0;
+    while (true) {
+        std::vector<int> pai(grafo.size(), -1);
+        std::vector<int> arestaPai(grafo.size(), -1);
+        std::queue<int> fila;
+        fila.push(origem);
+        pai[origem] = origem;
+
+        while (!fila.empty() && pai[destino] == -1) {
+            int atual = fila.front();
+            fila.pop();
+            for (int i = 0; i < (int)grafo[atual].size(); ++i) {
+                const ArestaFluxo& aresta = grafo[atual][i];
+                if (aresta.capacidade > 0 && pai[aresta.destino] == -1) {
+                    pai[aresta.destino] = atual;
+                    arestaPai[aresta.destino] = i;
+                    fila.push(aresta.destino);
+                }
+            }
+        }
+
+        if (pai[destino] == -1) break;
+        int gargalo = std::numeric_limits<int>::max();
+        for (int atual = destino; atual != origem; atual = pai[atual]) {
+            gargalo = std::min(gargalo, grafo[pai[atual]][arestaPai[atual]].capacidade);
+        }
+        for (int atual = destino; atual != origem; atual = pai[atual]) {
+            ArestaFluxo& ida = grafo[pai[atual]][arestaPai[atual]];
+            ida.capacidade -= gargalo;
+            grafo[atual][ida.reversa].capacidade += gargalo;
+        }
+        fluxoTotal += gargalo;
+    }
+    return fluxoTotal;
+}
+
+static void empurrarFluxo(std::vector<std::vector<ArestaFluxo>>& grafo, int origem, int indiceAresta, int quantidade) {
+    ArestaFluxo& ida = grafo[origem][indiceAresta];
+    ida.capacidade -= quantidade;
+    grafo[ida.destino][ida.reversa].capacidade += quantidade;
+}
+
+static bool construirSolucaoPorBacktracking(
+    std::vector<Candidato>& candidatos,
+    std::vector<Escola>& escolas
+) {
+    std::map<std::string, int> indiceTipo;
+    std::vector<std::vector<int>> candidatosPorTipo;
+    for (int indice = 0; indice < (int)candidatos.size(); ++indice) {
+        const std::string& tipo = candidatos[indice].tipo_prova;
+        if (indiceTipo.count(tipo) == 0) {
+            indiceTipo[tipo] = candidatosPorTipo.size();
+            candidatosPorTipo.push_back(std::vector<int>());
+        }
+        candidatosPorTipo[indiceTipo[tipo]].push_back(indice);
+    }
+
+    std::vector<std::vector<int>> jaNaEscola(escolas.size(), std::vector<int>(candidatosPorTipo.size(), 0));
+    for (int escola = 0; escola < (int)escolas.size(); ++escola) {
+        for (int indice : escolas[escola].candidatos_alocados) {
+            jaNaEscola[escola][indiceTipo[candidatos[indice].tipo_prova]]++;
+        }
+    }
+
+    std::vector<int> capacidades;
+    for (const Escola& escola : escolas) {
+        capacidades.push_back(escola.capacidadeMaxima);
+    }
+    const int maxTiposConstrucao = std::min(
+        MAX_TIPOS_POR_ESCOLA, (int)candidatosPorTipo.size());
+    std::vector<int> conjuntos;
+    for (int S = 0; S < (1 << candidatosPorTipo.size()); ++S) {
+        int quantidade = 0;
+        for (int tipo = 0; tipo < (int)candidatosPorTipo.size(); ++tipo) {
+            if (S & (1 << tipo)) ++quantidade;
+        }
+        if (quantidade == maxTiposConstrucao) conjuntos.push_back(S);
+    }
+    std::vector<int> demandas;
+    for (const std::vector<int>& grupo : candidatosPorTipo) demandas.push_back(grupo.size());
+    int capacidadeTotal = 0;
+    int demandaTotal = 0;
+    for (int capacidade : capacidades) capacidadeTotal += capacidade;
+    for (int demanda : demandas) demandaTotal += demanda;
+    int folga = capacidadeTotal - demandaTotal;
+    std::vector<int> cabe(1 << candidatosPorTipo.size(), folga);
+    for (int B = 0; B < (int)cabe.size(); ++B) {
+        for (int tipo = 0; tipo < (int)demandas.size(); ++tipo) {
+            if (B & (1 << tipo)) cabe[B] += demandas[tipo];
+        }
+    }
+    std::vector<std::vector<int>> conjuntosPorEscola(escolas.size(), conjuntos);
+    for (int escola = 0; escola < (int)escolas.size(); ++escola) {
+        std::map<int, int> mantidos;
+        for (int S : conjuntos) {
+            for (int tipo = 0; tipo < (int)demandas.size(); ++tipo) {
+                if (S & (1 << tipo)) mantidos[S] += jaNaEscola[escola][tipo];
+            }
+        }
+        std::stable_sort(conjuntosPorEscola[escola].begin(), conjuntosPorEscola[escola].end(),
+                         [&](int a, int b) { return mantidos[a] > mantidos[b]; });
+    }
+
+    std::vector<int> tiposDaEscola(escolas.size(), 0);
+    std::set<std::vector<int>> falhas;
+    if (!escolherTiposDasEscolas(
+            capacidades, conjuntosPorEscola, 0, cabe, falhas, tiposDaEscola)) {
+        return false;
+    }
+
+    const int numTipos = candidatosPorTipo.size();
+    const int numEscolas = escolas.size();
+    const int primeiroTipo = 1;
+    const int primeiraEscola = primeiroTipo + numTipos;
+    const int destino = primeiraEscola + numEscolas;
+    std::vector<std::vector<ArestaFluxo>> grafo(destino + 1);
+    std::vector<int> arestaOrigemTipo(numTipos);
+    std::vector<std::vector<int>> arestaTipoEscola(numTipos, std::vector<int>(numEscolas, -1));
+    std::vector<int> arestaEscolaDestino(numEscolas);
+    for (int tipo = 0; tipo < numTipos; ++tipo) {
+        arestaOrigemTipo[tipo] = grafo[0].size();
+        adicionarArestaFluxo(
+            grafo, 0, primeiroTipo + tipo, candidatosPorTipo[tipo].size());
+        for (int escola = 0; escola < numEscolas; ++escola) {
+            if (tiposDaEscola[escola] & (1 << tipo)) {
+                arestaTipoEscola[tipo][escola] = grafo[primeiroTipo + tipo].size();
+                adicionarArestaFluxo(
+                    grafo, primeiroTipo + tipo, primeiraEscola + escola,
+                    candidatosPorTipo[tipo].size());
+            }
+        }
+    }
+    for (int escola = 0; escola < numEscolas; ++escola) {
+        arestaEscolaDestino[escola] = grafo[primeiraEscola + escola].size();
+        adicionarArestaFluxo(
+            grafo, primeiraEscola + escola, destino,
+            escolas[escola].capacidadeMaxima);
+    }
+
+    int fluxoInicial = 0;
+    std::vector<int> faltaTipo = demandas;
+    for (int escola = 0; escola < numEscolas; ++escola) {
+        int vagas = escolas[escola].capacidadeMaxima;
+        for (int tipo = 0; tipo < numTipos; ++tipo) {
+            if (arestaTipoEscola[tipo][escola] == -1) continue;
+            int mantem = std::min(jaNaEscola[escola][tipo], std::min(vagas, faltaTipo[tipo]));
+            if (mantem == 0) continue;
+            empurrarFluxo(grafo, 0, arestaOrigemTipo[tipo], mantem);
+            empurrarFluxo(grafo, primeiroTipo + tipo, arestaTipoEscola[tipo][escola], mantem);
+            empurrarFluxo(grafo, primeiraEscola + escola, arestaEscolaDestino[escola], mantem);
+            vagas -= mantem;
+            faltaTipo[tipo] -= mantem;
+            fluxoInicial += mantem;
+        }
+    }
+
+    if (fluxoInicial + calcularFluxo(grafo, 0, destino) != demandaTotal) return false;
+
+    std::vector<std::vector<int>> quantidade(numTipos, std::vector<int>(numEscolas, 0));
+    for (int tipo = 0; tipo < numTipos; ++tipo) {
+        for (int escola = 0; escola < numEscolas; ++escola) {
+            if (arestaTipoEscola[tipo][escola] == -1) continue;
+            const ArestaFluxo& aresta = grafo[primeiroTipo + tipo][arestaTipoEscola[tipo][escola]];
+            quantidade[tipo][escola] = grafo[aresta.destino][aresta.reversa].capacidade;
+        }
+    }
+
+    std::vector<std::vector<int>> ficaram(numTipos, std::vector<int>(numEscolas, 0));
+    std::vector<std::vector<int>> semLugar(numTipos);
+    std::vector<bool> estaEmEscola(candidatos.size(), false);
+    for (int escola = 0; escola < numEscolas; ++escola) {
+        std::vector<int> ficam;
+        for (int indice : escolas[escola].candidatos_alocados) {
+            int tipo = indiceTipo[candidatos[indice].tipo_prova];
+            estaEmEscola[indice] = true;
+            if (ficaram[tipo][escola] < quantidade[tipo][escola]) {
+                ficam.push_back(indice);
+                ficaram[tipo][escola]++;
+            } else {
+                semLugar[tipo].push_back(indice);
+            }
+        }
+        escolas[escola].candidatos_alocados = ficam;
+    }
+    for (int indice = 0; indice < (int)candidatos.size(); ++indice) {
+        if (!estaEmEscola[indice]) {
+            semLugar[indiceTipo[candidatos[indice].tipo_prova]].push_back(indice);
+        }
+    }
+
+    for (int escola = 0; escola < numEscolas; ++escola) {
+        for (int tipo = 0; tipo < numTipos; ++tipo) {
+            while (ficaram[tipo][escola] < quantidade[tipo][escola]) {
+                int indice = semLugar[tipo].back();
+                semLugar[tipo].pop_back();
+                escolas[escola].candidatos_alocados.push_back(indice);
+                candidatos[indice].id_escola_atribuida = escolas[escola].id;
+                ficaram[tipo][escola]++;
+            }
+        }
+    }
+    return true;
 }
 
 bool instanciaViavel(const std::vector<Candidato>& candidatos, const std::vector<Escola>& escolas, int maxTipos) {
@@ -229,7 +525,10 @@ bool instanciaViavel(const std::vector<Candidato>& candidatos, const std::vector
     }
 
     std::set<std::vector<int>> falhas;
-    return escolherTiposDasEscolas(capacidades, conjuntos, 0, cabe, falhas);
+    std::vector<int> tiposDaEscola(capacidades.size(), 0);
+    std::vector<std::vector<int>> conjuntosPorEscola(capacidades.size(), conjuntos);
+    return escolherTiposDasEscolas(
+        capacidades, conjuntosPorEscola, 0, cabe, falhas, tiposDaEscola);
 }
 // apenas para validar instâncias, feito por IA
 
@@ -239,50 +538,17 @@ int criarSolucaoInicial(std::vector<Candidato>& candidatos, std::vector<Escola>&
     }
 
     std::vector<Grupo> grupos = criarGruposIniciais(candidatos, escolas.size());
-    agruparCandidatosKNN(candidatos, grupos);
+    agruparCandidatosKMeans(candidatos, grupos);
     alocarGruposEscolas(grupos, escolas, candidatos);
 
     if (validarSolucao(candidatos, escolas)) {
         return 0;
     }
 
-    for (size_t i = 0; i < escolas.size(); ++i) {
-        std::map<std::string, int> tipos = contarTipos(escolas[i], candidatos);
-        std::vector<std::pair<int, std::string>> tipos_por_quantidade;
-        for (const auto& t : tipos) {
-            tipos_por_quantidade.push_back({t.second, t.first});
-        }
-        std::sort(tipos_por_quantidade.begin(), tipos_por_quantidade.end(), std::greater<std::pair<int, std::string>>());
-
-        std::set<std::string> tipos_mantidos;
-        for (int k = 0; k < (int)tipos_por_quantidade.size() && k < MAX_TIPOS_POR_ESCOLA; ++k) {
-            tipos_mantidos.insert(tipos_por_quantidade[k].second);
-        }
-
-
-        std::vector<int> ficam;
-        std::vector<int> excedentes;
-        for (int idx_cand : escolas[i].candidatos_alocados) {
-            bool tipo_ok = tipos_mantidos.count(candidatos[idx_cand].tipo_prova) > 0;
-            if (tipo_ok && (int)ficam.size() < escolas[i].capacidadeMaxima) {
-                ficam.push_back(idx_cand);
-            } else {
-                excedentes.push_back(idx_cand);
-            }
-        }
-        escolas[i].candidatos_alocados = ficam;
-
-        for (int idx_cand : excedentes) {
-            int destino = acharEscolaComVaga(i, candidatos[idx_cand].tipo_prova, escolas, candidatos);
-            if (destino == -1) {
-                return -1;
-            }
-            escolas[destino].candidatos_alocados.push_back(idx_cand);
-            candidatos[idx_cand].id_escola_atribuida = escolas[destino].id;
-        }
+    if (!construirSolucaoPorBacktracking(candidatos, escolas)) {
+        return -2;
     }
-
-    return validarSolucao(candidatos, escolas) ? 0 : -1;
+    return validarSolucao(candidatos, escolas) ? 0 : -2;
 }
 
 double avaliarSolucao(const Instancia& instancia) {
