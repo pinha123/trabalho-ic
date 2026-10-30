@@ -5,52 +5,128 @@
 #include <functional>
 #include <limits>
 #include <map>
+#include <random>
 #include <set>
 
-int K_VIZINHOS = 1;
 int PESO_TIPO_PROVA = 2;
 int MAX_TIPOS_POR_ESCOLA = 3;
+int MAX_ITERACOES_KMEANS = 100;
 
-double calcularDistancia(double lat1, double lon1, double lat2, double lon2, std::string tipo_prova1, std::string tipo_prova2) {
-    double distanciaEuclidiana = std::sqrt(std::pow(lat1 - lat2, 2) + std::pow(lon1 - lon2, 2));
-    int distanciaTipoProva = (tipo_prova1 != tipo_prova2) ? PESO_TIPO_PROVA : 0;
-    double distanciaTotal = std::sqrt(std::pow(distanciaEuclidiana, 2) + std::pow(distanciaTipoProva, 2));
-    return distanciaTotal;
+double distanciaKm(double lat1, double lon1, double lat2, double lon2) {
+    const double KM_POR_GRAU = 111.32;
+    const double PI = 3.14159265358979;
+    double dLat = (lat1 - lat2) * KM_POR_GRAU;
+    double dLon = (lon1 - lon2) * KM_POR_GRAU * std::cos((lat1 + lat2) / 2 * PI / 180);
+    return std::sqrt(dLat * dLat + dLon * dLon);
+}
+
+double calcularDistancia(const Candidato& candidato, const Grupo& grupo) {
+    double geografica = distanciaKm(candidato.latitude, candidato.longitude, grupo.latitude, grupo.longitude);
+
+    double diferencaTipo = 0;
+    for (const auto& t : grupo.proporcao_tipos) {
+        double indicador = (t.first == candidato.tipo_prova) ? 1.0 : 0.0;
+        diferencaTipo += (indicador - t.second) * (indicador - t.second);
+    }
+    if (grupo.proporcao_tipos.count(candidato.tipo_prova) == 0) {
+        diferencaTipo += 1;
+    }
+
+    return std::sqrt(geografica * geografica + PESO_TIPO_PROVA * PESO_TIPO_PROVA * diferencaTipo);
+}
+
+static Grupo grupoNoCandidato(const Candidato& candidato, int id) {
+    Grupo g;
+    g.id = id;
+    g.latitude = candidato.latitude;
+    g.longitude = candidato.longitude;
+    g.proporcao_tipos[candidato.tipo_prova] = 1.0;
+    return g;
 }
 
 std::vector<Grupo> criarGruposIniciais(const std::vector<Candidato>& candidatos, int num_grupos) {
     std::vector<Grupo> grupos;
-    for (int i = 0; i < num_grupos && i < candidatos.size(); ++i) {
-        Grupo g;
-        g.id = i;
-        g.latitude = candidatos[i].latitude;
-        g.longitude = candidatos[i].longitude;
-        g.tipo_prova = candidatos[i].tipo_prova;
-        grupos.push_back(g);
+    if (candidatos.empty() || num_grupos <= 0) {
+        return grupos;
+    }
+
+    std::mt19937 gerador(42);
+    std::uniform_int_distribution<int> sorteio(0, (int)candidatos.size() - 1);
+    grupos.push_back(grupoNoCandidato(candidatos[sorteio(gerador)], 0));
+
+    while ((int)grupos.size() < num_grupos) {
+        std::vector<double> pesos(candidatos.size());
+        double total = 0;
+        for (size_t i = 0; i < candidatos.size(); ++i) {
+            double menor = std::numeric_limits<double>::max();
+            for (const Grupo& g : grupos) {
+                menor = std::min(menor, calcularDistancia(candidatos[i], g));
+            }
+            pesos[i] = menor * menor;
+            total += pesos[i];
+        }
+        if (total == 0) {
+            break;
+        }
+
+        std::discrete_distribution<int> escolha(pesos.begin(), pesos.end());
+        grupos.push_back(grupoNoCandidato(candidatos[escolha(gerador)], grupos.size()));
     }
     return grupos;
 }
 
-void agruparCandidatosKNN(std::vector<Candidato>& candidatos, std::vector<Grupo>& grupos) {
-    for (size_t i = 0; i < candidatos.size(); ++i) {
-        double menor_distancia = std::numeric_limits<double>::max();
-        int id_melhor_grupo = -1;
+void agruparCandidatosKMeans(std::vector<Candidato>& candidatos, std::vector<Grupo>& grupos) {
+    std::vector<int> grupoDoCandidato(candidatos.size(), -1);
 
-        for (size_t j = 0; j < grupos.size(); ++j) {
-            double dist = calcularDistancia(
-                candidatos[i].latitude, candidatos[i].longitude,
-                grupos[j].latitude, grupos[j].longitude,
-                candidatos[i].tipo_prova, grupos[j].tipo_prova
-            );
-
-            if (dist < menor_distancia) {
-                menor_distancia = dist;
-                id_melhor_grupo = j;
+    for (int iteracao = 0; iteracao < MAX_ITERACOES_KMEANS; ++iteracao) {
+        bool mudou = false;
+        for (size_t i = 0; i < candidatos.size(); ++i) {
+            double menor_distancia = std::numeric_limits<double>::max();
+            int melhor_grupo = -1;
+            for (size_t j = 0; j < grupos.size(); ++j) {
+                double dist = calcularDistancia(candidatos[i], grupos[j]);
+                if (dist < menor_distancia) {
+                    menor_distancia = dist;
+                    melhor_grupo = j;
+                }
+            }
+            if (melhor_grupo != grupoDoCandidato[i]) {
+                grupoDoCandidato[i] = melhor_grupo;
+                mudou = true;
             }
         }
+        if (!mudou) {
+            break;
+        }
 
-        if (id_melhor_grupo != -1) {
-            grupos[id_melhor_grupo].candidatos_alocados.push_back(i);
+        for (size_t j = 0; j < grupos.size(); ++j) {
+            double somaLat = 0, somaLon = 0;
+            int quantos = 0;
+            std::map<std::string, double> contagemTipos;
+            for (size_t i = 0; i < candidatos.size(); ++i) {
+                if (grupoDoCandidato[i] != (int)j) continue;
+                somaLat += candidatos[i].latitude;
+                somaLon += candidatos[i].longitude;
+                contagemTipos[candidatos[i].tipo_prova] += 1;
+                quantos++;
+            }
+            if (quantos == 0) continue;
+
+            grupos[j].latitude = somaLat / quantos;
+            grupos[j].longitude = somaLon / quantos;
+            grupos[j].proporcao_tipos.clear();
+            for (const auto& t : contagemTipos) {
+                grupos[j].proporcao_tipos[t.first] = t.second / quantos;
+            }
+        }
+    }
+
+    for (Grupo& g : grupos) {
+        g.candidatos_alocados.clear();
+    }
+    for (size_t i = 0; i < candidatos.size(); ++i) {
+        if (grupoDoCandidato[i] != -1) {
+            grupos[grupoDoCandidato[i]].candidatos_alocados.push_back(i);
         }
     }
 }
@@ -61,7 +137,7 @@ void alocarGruposEscolas(std::vector<Grupo>& grupos, std::vector<Escola>& escola
         int id_escola_proxima = -1;
 
         for (size_t j = 0; j < escolas.size(); ++j) {
-            double dist = std::sqrt(std::pow(grupos[i].latitude - escolas[j].latitude, 2) + std::pow(grupos[i].longitude - escolas[j].longitude, 2));
+            double dist = distanciaKm(grupos[i].latitude, grupos[i].longitude, escolas[j].latitude, escolas[j].longitude);
             if (dist < menor_dist) {
                 menor_dist = dist;
                 id_escola_proxima = j;
@@ -239,7 +315,7 @@ int criarSolucaoInicial(std::vector<Candidato>& candidatos, std::vector<Escola>&
     }
 
     std::vector<Grupo> grupos = criarGruposIniciais(candidatos, escolas.size());
-    agruparCandidatosKNN(candidatos, grupos);
+    agruparCandidatosKMeans(candidatos, grupos);
     alocarGruposEscolas(grupos, escolas, candidatos);
 
     if (validarSolucao(candidatos, escolas)) {

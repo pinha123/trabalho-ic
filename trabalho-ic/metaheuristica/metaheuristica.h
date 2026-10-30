@@ -1,26 +1,28 @@
 #ifndef METAHEURISTICA_H
 #define METAHEURISTICA_H
 
+#include <map>
 #include <string>
 #include <vector>
 
 #include "../leitorDeInstancias/leitorDeInstancias.h"
 
-extern int K_VIZINHOS;
 extern int PESO_TIPO_PROVA;
 extern int MAX_TIPOS_POR_ESCOLA;
+extern int MAX_ITERACOES_KMEANS;
 
 struct Grupo {
     int id;
     double latitude;
     double longitude;
-    std::string tipo_prova;
+    std::map<std::string, double> proporcao_tipos;
     std::vector<int> candidatos_alocados;
 };
 
-double calcularDistancia(double lat1, double lon1, double lat2, double lon2, std::string tipo_prova1, std::string tipo_prova2);
+double distanciaKm(double lat1, double lon1, double lat2, double lon2);
+double calcularDistancia(const Candidato& candidato, const Grupo& grupo);
 std::vector<Grupo> criarGruposIniciais(const std::vector<Candidato>& candidatos, int num_grupos);
-void agruparCandidatosKNN(std::vector<Candidato>& candidatos, std::vector<Grupo>& grupos);
+void agruparCandidatosKMeans(std::vector<Candidato>& candidatos, std::vector<Grupo>& grupos);
 void alocarGruposEscolas(std::vector<Grupo>& grupos, std::vector<Escola>& escolas, std::vector<Candidato>& candidatos);
 
 

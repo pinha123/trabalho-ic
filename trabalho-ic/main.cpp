@@ -68,7 +68,7 @@ int main(int argc, char* argv[]) {
         std::vector<Grupo> grupos =
             criarGruposIniciais(instancia.candidatos, instancia.num_escolas);
 
-        agruparCandidatosKNN(instancia.candidatos, grupos);
+        agruparCandidatosKMeans(instancia.candidatos, grupos);
 
         alocarGruposEscolas(
             grupos,
