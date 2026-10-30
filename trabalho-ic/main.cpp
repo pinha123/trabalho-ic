@@ -112,12 +112,18 @@ int main(int argc, char* argv[]) {
 
         for (int execucao = 0; execucao < NUM_EXECUCOES; ++execucao) {
             Instancia solucaoInicial = instancia;
-            if (criarSolucaoInicial(
-                    solucaoInicial.candidatos,
-                    solucaoInicial.escolas
-                ) != 0) {
-                std::cerr << "Erro: a instância '" << instancia.nome
-                          << "' não possui solução viável." << std::endl;
+            const int resultado = criarSolucaoInicial(
+                solucaoInicial.candidatos,
+                solucaoInicial.escolas
+            );
+            if (resultado != 0) {
+                if (resultado == -1) {
+                    std::cerr << "Erro: a instância '" << instancia.nome
+                              << "' não possui solução viável." << std::endl;
+                } else {
+                    std::cerr << "Erro: não foi possível dividir as salas da instância '"
+                              << instancia.nome << "' entre os tipos de prova." << std::endl;
+                }
                 /* std::cerr << "Alunos não alocados: "
                           << contarAlunosNaoAlocados(solucaoInicial)
                           << std::endl; */

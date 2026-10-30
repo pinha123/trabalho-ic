@@ -8,6 +8,7 @@
 #include <random>
 #include <set>
 #include <queue>
+#include <tuple>
 
 int PESO_TIPO_PROVA = 2;
 int MAX_TIPOS_POR_ESCOLA = 2;
@@ -162,6 +163,73 @@ static std::map<std::string, int> contarTipos(const Escola& escola, const std::v
     return tipos;
 }
 
+static bool distribuirSalas(const std::vector<int>& salas, int sala, std::vector<int>& faltam,
+                            int capacidadeRestante, int demandaRestante,
+                            std::set<std::pair<int, std::vector<int>>>& falhas) {
+    if (demandaRestante == 0) return true;
+    if (sala == (int)salas.size() || capacidadeRestante < demandaRestante) return false;
+
+    std::vector<int> chave = faltam;
+    std::sort(chave.begin(), chave.end());
+    if (falhas.count({sala, chave})) return false;
+
+    std::set<int> jaTentados;
+    for (int& falta : faltam) {
+        // tipos que ainda precisam da mesma quantidade são equivalentes
+        if (falta == 0 || !jaTentados.insert(falta).second) continue;
+        int usados = std::min(falta, salas[sala]);
+        falta -= usados;
+        bool deuCerto = distribuirSalas(salas, sala + 1, faltam, capacidadeRestante - salas[sala],
+                                        demandaRestante - usados, falhas);
+        falta += usados;
+        if (deuCerto) return true;
+    }
+    // a sala também pode ficar vazia
+    if (distribuirSalas(salas, sala + 1, faltam, capacidadeRestante - salas[sala], demandaRestante, falhas)) {
+        return true;
+    }
+
+    falhas.insert({sala, chave});
+    return false;
+}
+
+bool salasComportam(const std::vector<int>& capacidades_salas, const std::vector<int>& quantidades) {
+    std::vector<int> faltam;
+    int demandaTotal = 0;
+    for (int q : quantidades) {
+        if (q > 0) {
+            faltam.push_back(q);
+            demandaTotal += q;
+        }
+    }
+    int capacidadeTotal = 0;
+    for (int c : capacidades_salas) capacidadeTotal += c;
+
+    if (demandaTotal > capacidadeTotal) return false;
+    if (faltam.size() <= 1) return true;
+    if (faltam.size() > capacidades_salas.size()) return false;
+
+    if (faltam.size() == 2) {
+        // basta um subconjunto de salas com soma s tal que faltam[0] <= s <= capacidadeTotal - faltam[1]
+        std::vector<char> alcancavel(capacidadeTotal + 1, 0);
+        alcancavel[0] = 1;
+        for (int c : capacidades_salas) {
+            for (int s = capacidadeTotal; s >= c; --s) {
+                if (alcancavel[s - c]) alcancavel[s] = 1;
+            }
+        }
+        for (int s = faltam[0]; s <= capacidadeTotal - faltam[1]; ++s) {
+            if (alcancavel[s]) return true;
+        }
+        return false;
+    }
+
+    std::vector<int> salas = capacidades_salas;
+    std::sort(salas.begin(), salas.end(), std::greater<int>());
+    std::set<std::pair<int, std::vector<int>>> falhas;
+    return distribuirSalas(salas, 0, faltam, capacidadeTotal, demandaTotal, falhas);
+}
+
 bool validarSolucao(const std::vector<Candidato>& candidatos, const std::vector<Escola>& escolas) {
     for (const Candidato& c : candidatos) {
         if (c.id_escola_atribuida == -1) {
@@ -170,10 +238,15 @@ bool validarSolucao(const std::vector<Candidato>& candidatos, const std::vector<
     }
 
     for (const Escola& e : escolas) {
-        if ((int)e.candidatos_alocados.size() > e.capacidadeMaxima) {
+        std::map<std::string, int> tipos = contarTipos(e, candidatos);
+        if ((int)tipos.size() > MAX_TIPOS_POR_ESCOLA) {
             return false;
         }
-        if ((int)contarTipos(e, candidatos).size() > MAX_TIPOS_POR_ESCOLA) {
+        std::vector<int> quantidades;
+        for (const auto& t : tipos) {
+            quantidades.push_back(t.second);
+        }
+        if (!salasComportam(e.capacidades_salas, quantidades)) {
             return false;
         }
     }
@@ -314,7 +387,197 @@ static void empurrarFluxo(std::vector<std::vector<ArestaFluxo>>& grafo, int orig
     grafo[ida.destino][ida.reversa].capacidade += quantidade;
 }
 
-static bool construirSolucaoPorBacktracking(
+static int deficitTotal(const std::vector<int>& demandas, const std::vector<int>& capacidadePorTipo) {
+    int deficit = 0;
+    for (size_t tipo = 0; tipo < demandas.size(); ++tipo) {
+        deficit += std::max(0, demandas[tipo] - capacidadePorTipo[tipo]);
+    }
+    return deficit;
+}
+
+// Muda o tipo das salas até todo tipo ter lugar para todos os seus candidatos.
+// Movimentos: mudar o tipo de uma sala, ou trocar os tipos de duas salas da mesma escola.
+static bool cobrirDemandas(
+    const std::vector<Escola>& escolas,
+    const std::vector<int>& demandas,
+    std::vector<std::vector<int>>& tipoDaSala
+) {
+    const int numTipos = demandas.size();
+    std::vector<int> capacidadePorTipo(numTipos, 0);
+    std::vector<std::vector<int>> salasDoTipo(escolas.size(), std::vector<int>(numTipos, 0));
+    std::vector<int> tiposNaEscola(escolas.size(), 0);
+    for (int escola = 0; escola < (int)escolas.size(); ++escola) {
+        for (int s = 0; s < (int)tipoDaSala[escola].size(); ++s) {
+            int tipo = tipoDaSala[escola][s];
+            capacidadePorTipo[tipo] += escolas[escola].capacidades_salas[s];
+            if (salasDoTipo[escola][tipo]++ == 0) tiposNaEscola[escola]++;
+        }
+    }
+
+    int deficit = deficitTotal(demandas, capacidadePorTipo);
+    while (deficit > 0) {
+        int melhorDeficit = deficit;
+        int melhorEscola = -1, melhorSala = -1, melhorTipo = -1, melhorOutraSala = -1;
+
+        for (int escola = 0; escola < (int)escolas.size(); ++escola) {
+            const std::vector<int>& salas = escolas[escola].capacidades_salas;
+            for (int s = 0; s < (int)salas.size(); ++s) {
+                int atual = tipoDaSala[escola][s];
+
+                for (int tipo = 0; tipo < numTipos; ++tipo) {
+                    if (tipo == atual) continue;
+                    int tipos = tiposNaEscola[escola]
+                              + (salasDoTipo[escola][tipo] == 0 ? 1 : 0)
+                              - (salasDoTipo[escola][atual] == 1 ? 1 : 0);
+                    if (tipos > MAX_TIPOS_POR_ESCOLA) continue;
+
+                    capacidadePorTipo[atual] -= salas[s];
+                    capacidadePorTipo[tipo] += salas[s];
+                    int novo = deficitTotal(demandas, capacidadePorTipo);
+                    capacidadePorTipo[atual] += salas[s];
+                    capacidadePorTipo[tipo] -= salas[s];
+                    if (novo < melhorDeficit) {
+                        melhorDeficit = novo;
+                        melhorEscola = escola;
+                        melhorSala = s;
+                        melhorTipo = tipo;
+                        melhorOutraSala = -1;
+                    }
+                }
+
+                for (int outra = s + 1; outra < (int)salas.size(); ++outra) {
+                    int outroTipo = tipoDaSala[escola][outra];
+                    if (outroTipo == atual || salas[outra] == salas[s]) continue;
+
+                    capacidadePorTipo[atual] += salas[outra] - salas[s];
+                    capacidadePorTipo[outroTipo] += salas[s] - salas[outra];
+                    int novo = deficitTotal(demandas, capacidadePorTipo);
+                    capacidadePorTipo[atual] -= salas[outra] - salas[s];
+                    capacidadePorTipo[outroTipo] -= salas[s] - salas[outra];
+                    if (novo < melhorDeficit) {
+                        melhorDeficit = novo;
+                        melhorEscola = escola;
+                        melhorSala = s;
+                        melhorTipo = -1;
+                        melhorOutraSala = outra;
+                    }
+                }
+            }
+        }
+
+        if (melhorEscola == -1) return false;
+
+        const std::vector<int>& salas = escolas[melhorEscola].capacidades_salas;
+        int atual = tipoDaSala[melhorEscola][melhorSala];
+        if (melhorOutraSala == -1) {
+            capacidadePorTipo[atual] -= salas[melhorSala];
+            capacidadePorTipo[melhorTipo] += salas[melhorSala];
+            if (--salasDoTipo[melhorEscola][atual] == 0) tiposNaEscola[melhorEscola]--;
+            if (salasDoTipo[melhorEscola][melhorTipo]++ == 0) tiposNaEscola[melhorEscola]++;
+            tipoDaSala[melhorEscola][melhorSala] = melhorTipo;
+        } else {
+            int outroTipo = tipoDaSala[melhorEscola][melhorOutraSala];
+            capacidadePorTipo[atual] += salas[melhorOutraSala] - salas[melhorSala];
+            capacidadePorTipo[outroTipo] += salas[melhorSala] - salas[melhorOutraSala];
+            std::swap(tipoDaSala[melhorEscola][melhorSala], tipoDaSala[melhorEscola][melhorOutraSala]);
+        }
+        deficit = melhorDeficit;
+    }
+    return true;
+}
+
+// Busca exata pela divisão das salas, usada quando cobrirDemandas trava (instâncias pequenas e
+// apertadas). Percorre as escolas em ordem, dando a cada sala um tipo ou deixando-a vazia;
+// lembra quais demandas restantes já falharam a partir de cada escola.
+const long long LIMITE_NOS_BUSCA_SALAS = 50000000;
+
+struct BuscaSalas {
+    const std::vector<Escola>& escolas;
+    int numTipos;
+    std::vector<std::vector<int>> ordemSalas;  // salas de cada escola, da maior para a menor
+    std::vector<int> capacidadeDaliEmDiante;
+    std::vector<std::vector<int>> tipoDaSala;
+    std::set<std::pair<int, std::vector<int>>> falhas;
+    long long nos = 0;
+    bool estourou = false;
+
+    BuscaSalas(const std::vector<Escola>& escolas, int numTipos)
+        : escolas(escolas), numTipos(numTipos), ordemSalas(escolas.size()),
+          capacidadeDaliEmDiante(escolas.size() + 1, 0), tipoDaSala(escolas.size()) {
+        for (int escola = (int)escolas.size() - 1; escola >= 0; --escola) {
+            const std::vector<int>& salas = escolas[escola].capacidades_salas;
+            for (int s = 0; s < (int)salas.size(); ++s) ordemSalas[escola].push_back(s);
+            std::stable_sort(ordemSalas[escola].begin(), ordemSalas[escola].end(),
+                             [&](int a, int b) { return salas[a] > salas[b]; });
+            capacidadeDaliEmDiante[escola] = capacidadeDaliEmDiante[escola + 1] + escolas[escola].capacidadeMaxima;
+            tipoDaSala[escola].assign(salas.size(), -1);
+        }
+    }
+
+    bool escolherEscola(int escola, std::vector<int>& falta) {
+        int faltaTotal = 0;
+        for (int f : falta) faltaTotal += f;
+        if (faltaTotal == 0) return true;
+        if (escola == (int)escolas.size() || faltaTotal > capacidadeDaliEmDiante[escola]) return false;
+        if (falhas.count({escola, falta})) return false;
+
+        if (distribuirNaEscola(escola, 0, falta, 0, -1)) return true;
+        if (!estourou) falhas.insert({escola, falta});
+        return false;
+    }
+
+    // tipoAnterior: escolha da sala anterior (numTipos = vazia); salas de mesma capacidade
+    // recebem escolhas em ordem crescente, para não repetir divisões equivalentes.
+    bool distribuirNaEscola(int escola, int pos, std::vector<int>& falta, int tiposUsados, int tipoAnterior) {
+        if (pos == (int)ordemSalas[escola].size()) return escolherEscola(escola + 1, falta);
+        if (++nos > LIMITE_NOS_BUSCA_SALAS) {
+            estourou = true;
+            return false;
+        }
+
+        const std::vector<int>& salas = escolas[escola].capacidades_salas;
+        int sala = ordemSalas[escola][pos];
+        bool mesmaCapacidade = pos > 0 && salas[ordemSalas[escola][pos - 1]] == salas[sala];
+        int menorEscolha = mesmaCapacidade ? tipoAnterior : 0;
+
+        int quantosUsados = 0;
+        for (int tipo = 0; tipo < numTipos; ++tipo) {
+            if (tiposUsados & (1 << tipo)) quantosUsados++;
+        }
+
+        // dar a sala a um tipo já coberto não ajuda: nesse caso ela fica vazia
+        for (int tipo = menorEscolha; tipo < numTipos; ++tipo) {
+            if (falta[tipo] == 0) continue;
+            bool novo = !(tiposUsados & (1 << tipo));
+            if (novo && quantosUsados == MAX_TIPOS_POR_ESCOLA) continue;
+
+            int usados = std::min(falta[tipo], salas[sala]);
+            falta[tipo] -= usados;
+            tipoDaSala[escola][sala] = tipo;
+            bool deuCerto = distribuirNaEscola(escola, pos + 1, falta, tiposUsados | (1 << tipo), tipo);
+            falta[tipo] += usados;
+            if (deuCerto) return true;
+            if (estourou) return false;
+        }
+
+        tipoDaSala[escola][sala] = -1;
+        return distribuirNaEscola(escola, pos + 1, falta, tiposUsados, numTipos);
+    }
+};
+
+// 0: salas divididas; -1: provado que não há divisão; -2: a busca atingiu o limite de nós.
+static int buscarSalasExata(const std::vector<Escola>& escolas, const std::vector<int>& demandas,
+                            std::vector<std::vector<int>>& tipoDaSala) {
+    BuscaSalas busca(escolas, demandas.size());
+    std::vector<int> falta = demandas;
+    if (busca.escolherEscola(0, falta)) {
+        tipoDaSala = busca.tipoDaSala;
+        return 0;
+    }
+    return busca.estourou ? -2 : -1;
+}
+
+static int construirSolucaoPorBacktracking(
     std::vector<Candidato>& candidatos,
     std::vector<Escola>& escolas
 ) {
@@ -379,7 +642,7 @@ static bool construirSolucaoPorBacktracking(
     std::set<std::vector<int>> falhas;
     if (!escolherTiposDasEscolas(
             capacidades, conjuntosPorEscola, 0, cabe, falhas, tiposDaEscola)) {
-        return false;
+        return -2;
     }
 
     const int numTipos = candidatosPorTipo.size();
@@ -428,7 +691,7 @@ static bool construirSolucaoPorBacktracking(
         }
     }
 
-    if (fluxoInicial + calcularFluxo(grafo, 0, destino) != demandaTotal) return false;
+    if (fluxoInicial + calcularFluxo(grafo, 0, destino) != demandaTotal) return -2;
 
     std::vector<std::vector<int>> quantidade(numTipos, std::vector<int>(numEscolas, 0));
     for (int tipo = 0; tipo < numTipos; ++tipo) {
@@ -439,43 +702,76 @@ static bool construirSolucaoPorBacktracking(
         }
     }
 
-    std::vector<std::vector<int>> ficaram(numTipos, std::vector<int>(numEscolas, 0));
-    std::vector<std::vector<int>> semLugar(numTipos);
-    std::vector<bool> estaEmEscola(candidatos.size(), false);
+    // O fluxo divide a capacidade da escola entre os tipos, mas uma sala só recebe um tipo:
+    // as salas maiores vão para o tipo que ainda precisa de mais lugares na escola.
+    std::vector<std::vector<int>> tipoDaSala(numEscolas);
     for (int escola = 0; escola < numEscolas; ++escola) {
-        std::vector<int> ficam;
-        for (int indice : escolas[escola].candidatos_alocados) {
-            int tipo = indiceTipo[candidatos[indice].tipo_prova];
-            estaEmEscola[indice] = true;
-            if (ficaram[tipo][escola] < quantidade[tipo][escola]) {
-                ficam.push_back(indice);
-                ficaram[tipo][escola]++;
-            } else {
-                semLugar[tipo].push_back(indice);
+        const std::vector<int>& salas = escolas[escola].capacidades_salas;
+        std::vector<int> ordem(salas.size());
+        for (int s = 0; s < (int)salas.size(); ++s) ordem[s] = s;
+        std::stable_sort(ordem.begin(), ordem.end(), [&](int a, int b) { return salas[a] > salas[b]; });
+
+        std::vector<int> recebeu(numTipos, 0);
+        tipoDaSala[escola].assign(salas.size(), -1);
+        for (int s : ordem) {
+            int melhorTipo = -1;
+            for (int tipo = 0; tipo < numTipos; ++tipo) {
+                if (!(tiposDaEscola[escola] & (1 << tipo))) continue;
+                if (melhorTipo == -1 ||
+                    quantidade[tipo][escola] - recebeu[tipo] > quantidade[melhorTipo][escola] - recebeu[melhorTipo]) {
+                    melhorTipo = tipo;
+                }
             }
-        }
-        escolas[escola].candidatos_alocados = ficam;
-    }
-    for (int indice = 0; indice < (int)candidatos.size(); ++indice) {
-        if (!estaEmEscola[indice]) {
-            semLugar[indiceTipo[candidatos[indice].tipo_prova]].push_back(indice);
+            tipoDaSala[escola][s] = melhorTipo;
+            recebeu[melhorTipo] += salas[s];
         }
     }
 
+    if (!cobrirDemandas(escolas, demandas, tipoDaSala)) {
+        int resultado = buscarSalasExata(escolas, demandas, tipoDaSala);
+        if (resultado != 0) return resultado;
+    }
+
+    std::vector<std::vector<int>> vagas(numEscolas, std::vector<int>(numTipos, 0));
     for (int escola = 0; escola < numEscolas; ++escola) {
-        for (int tipo = 0; tipo < numTipos; ++tipo) {
-            while (ficaram[tipo][escola] < quantidade[tipo][escola]) {
-                int indice = semLugar[tipo].back();
-                semLugar[tipo].pop_back();
-                escolas[escola].candidatos_alocados.push_back(indice);
-                candidatos[indice].id_escola_atribuida = escolas[escola].id;
-                ficaram[tipo][escola]++;
+        for (int s = 0; s < (int)tipoDaSala[escola].size(); ++s) {
+            if (tipoDaSala[escola][s] == -1) continue;
+            vagas[escola][tipoDaSala[escola][s]] += escolas[escola].capacidades_salas[s];
+        }
+        escolas[escola].candidatos_alocados.clear();
+    }
+    for (Candidato& candidato : candidatos) {
+        candidato.id_escola_atribuida = -1;
+    }
+
+    // Cada tipo já tem lugares suficientes; os candidatos vão para a escola mais próxima com vaga.
+    for (int tipo = 0; tipo < numTipos; ++tipo) {
+        std::vector<std::tuple<double, int, int>> pares;
+        for (int indice : candidatosPorTipo[tipo]) {
+            for (int escola = 0; escola < numEscolas; ++escola) {
+                if (vagas[escola][tipo] == 0) continue;
+                double dist = distanciaKm(candidatos[indice].latitude, candidatos[indice].longitude,
+                                          escolas[escola].latitude, escolas[escola].longitude);
+                pares.push_back({dist, indice, escola});
             }
         }
+        std::sort(pares.begin(), pares.end());
+
+        for (const auto& par : pares) {
+            int indice = std::get<1>(par);
+            int escola = std::get<2>(par);
+            if (candidatos[indice].id_escola_atribuida != -1 || vagas[escola][tipo] == 0) continue;
+            escolas[escola].candidatos_alocados.push_back(indice);
+            candidatos[indice].id_escola_atribuida = escolas[escola].id;
+            vagas[escola][tipo]--;
+        }
     }
-    return true;
+    return 0;
 }
 
+// Trata a escola como um bloco de capacidadeMaxima lugares, sem olhar a divisão em salas.
+// Com maxTipos == 1 isso é exato; com mais tipos é só condição necessária: a construção
+// ainda pode falhar ao dividir as salas entre os tipos.
 bool instanciaViavel(const std::vector<Candidato>& candidatos, const std::vector<Escola>& escolas, int maxTipos) {
     std::map<std::string, int> contagem;
     for (const Candidato& c : candidatos) {
@@ -545,8 +841,9 @@ int criarSolucaoInicial(std::vector<Candidato>& candidatos, std::vector<Escola>&
         return 0;
     }
 
-    if (!construirSolucaoPorBacktracking(candidatos, escolas)) {
-        return -2;
+    int resultado = construirSolucaoPorBacktracking(candidatos, escolas);
+    if (resultado != 0) {
+        return resultado;
     }
     return validarSolucao(candidatos, escolas) ? 0 : -2;
 }
@@ -604,15 +901,16 @@ static DadosTroca montarDadosTroca(const Instancia& instancia) {
     return d;
 }
 
-static bool tiposOk(const DadosTroca& d, int escola, int tipoQueSai, int tipoQueEntra) {
-    int tiposDiferentes = 0;
+static bool escolaComporta(const Instancia& instancia, const DadosTroca& d, int escola, int tipoQueSai, int tipoQueEntra) {
+    std::vector<int> quantidades;
     for (int t = 0; t < d.numTipos; ++t) {
         int quantos = d.quantosDoTipo[escola][t];
         if (t == tipoQueSai) quantos--;
         if (t == tipoQueEntra) quantos++;
-        if (quantos > 0) tiposDiferentes++;
+        if (quantos > 0) quantidades.push_back(quantos);
     }
-    return tiposDiferentes <= MAX_TIPOS_POR_ESCOLA;
+    if ((int)quantidades.size() > MAX_TIPOS_POR_ESCOLA) return false;
+    return salasComportam(instancia.escolas[escola].capacidades_salas, quantidades);
 }
 
 static void transferirAluno(Instancia& instancia, int aluno, int de, int para) {
@@ -635,7 +933,7 @@ bool moverAluno(Instancia& instancia) {
             for (int t = 0; t < d.numTipos; ++t) {
                 if (d.melhorAluno[de][para][t] == -1) continue;
                 if (d.melhorVariacao[de][para][t] >= melhor) continue;
-                if (!tiposOk(d, para, -1, t)) continue;
+                if (!escolaComporta(instancia, d, para, -1, t)) continue;
                 melhor = d.melhorVariacao[de][para][t];
                 melhorDe = de;
                 melhorPara = para;
@@ -663,7 +961,7 @@ bool trocarDoisAlunos(Instancia& instancia) {
                     if (d.melhorAluno[b][a][tb] == -1) continue;
                     double variacao = d.melhorVariacao[a][b][ta] + d.melhorVariacao[b][a][tb];
                     if (variacao >= melhor) continue;
-                    if (!tiposOk(d, a, ta, tb) || !tiposOk(d, b, tb, ta)) continue;
+                    if (!escolaComporta(instancia, d, a, ta, tb) || !escolaComporta(instancia, d, b, tb, ta)) continue;
                     melhor = variacao;
                     melhorA = a;
                     melhorB = b;
@@ -701,7 +999,7 @@ bool trocarTresAlunos(Instancia& instancia) {
                             if (d.melhorAluno[c][a][tc] == -1) continue;
                             double variacao = d.melhorVariacao[a][b][ta] + d.melhorVariacao[b][c][tb] + d.melhorVariacao[c][a][tc];
                             if (variacao >= melhor) continue;
-                            if (!tiposOk(d, a, ta, tc) || !tiposOk(d, b, tb, ta) || !tiposOk(d, c, tc, tb)) continue;
+                            if (!escolaComporta(instancia, d, a, ta, tc) || !escolaComporta(instancia, d, b, tb, ta) || !escolaComporta(instancia, d, c, tc, tb)) continue;
                             melhor = variacao;
                             melhorA = a;
                             melhorB = b;

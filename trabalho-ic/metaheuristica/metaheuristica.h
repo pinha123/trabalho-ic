@@ -26,6 +26,10 @@ void agruparCandidatosKMeans(std::vector<Candidato>& candidatos, std::vector<Gru
 void alocarGruposEscolas(std::vector<Grupo>& grupos, std::vector<Escola>& escolas, std::vector<Candidato>& candidatos);
 
 
+// Cada sala recebe um único tipo de prova: diz se as salas podem ser divididas entre os tipos
+// de forma que cada tipo tenha lugar para as suas quantidades de candidatos.
+bool salasComportam(const std::vector<int>& capacidades_salas, const std::vector<int>& quantidades);
+
 bool validarSolucao(const std::vector<Candidato>& candidatos, const std::vector<Escola>& escolas);
 
 bool instanciaViavel(const std::vector<Candidato>& candidatos, const std::vector<Escola>& escolas, int maxTipos);
